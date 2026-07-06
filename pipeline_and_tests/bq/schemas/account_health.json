@@ -1,0 +1,6 @@
+[
+  {"name": "account_id",              "type": "STRING", "mode": "REQUIRED"},
+  {"name": "date",                    "type": "DATE",   "mode": "REQUIRED"},
+  {"name": "health_color",            "type": "STRING", "mode": "REQUIRED"},
+  {"name": "compute_credits_consumed","type": "INT64",  "mode": "REQUIRED"}
+]

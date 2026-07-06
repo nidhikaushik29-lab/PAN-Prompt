@@ -1,0 +1,9 @@
+[
+  {"name": "ticket_id",     "type": "STRING", "mode": "REQUIRED"},
+  {"name": "account_id",    "type": "STRING", "mode": "REQUIRED"},
+  {"name": "opened_date",   "type": "DATE",   "mode": "REQUIRED"},
+  {"name": "closed_date",   "type": "DATE",   "mode": "NULLABLE"},
+  {"name": "severity",      "type": "INT64",  "mode": "REQUIRED"},
+  {"name": "product_area",  "type": "STRING", "mode": "REQUIRED"},
+  {"name": "status",        "type": "STRING", "mode": "REQUIRED"}
+]

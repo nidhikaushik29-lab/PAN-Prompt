@@ -1,0 +1,114 @@
+version: 2
+
+# ==========================================================================
+# Sources: raw tables loaded by src/bq/load.py in Phase 1.
+# All 6 tables live in project global-customer-services-gcs, dataset
+# gcs_north_star. Column contracts are inherited from
+# specs/02-data-model.md and enforced by src/bq/schemas/*.json.
+# ==========================================================================
+
+sources:
+  - name: gcs_raw
+    description: "Phase 1 raw tables loaded from data/raw/*.csv via pipeline_and_tests/bq/load.py"
+    database: global-customer-services-gcs
+    schema: gcs_north_star
+    tables:
+      - name: csm_reps
+        description: "50 Customer Success Managers with region + segment focus"
+        columns:
+          - name: csm_id
+            description: "PK — REP-####"
+            tests:
+              - unique
+              - not_null
+          - name: region
+            tests:
+              - not_null
+              - accepted_values:
+                  values: ['AMER', 'EMEA', 'APAC', 'JAPAC']
+
+      - name: accounts
+        description: "1,000 customer accounts"
+        columns:
+          - name: account_id
+            description: "PK — ACCT-######"
+            tests:
+              - unique
+              - not_null
+          - name: rep_id
+            description: "FK → csm_reps.csm_id (name mismatch intentional; preserves business-side 'rep' naming)"
+            tests:
+              - not_null
+              - relationships:
+                  to: source('gcs_raw', 'csm_reps')
+                  field: csm_id
+          - name: segment
+            tests:
+              - accepted_values:
+                  values: ['Enterprise', 'Mid-Market', 'SMB']
+
+      - name: contracts
+        description: "1,200 contracts (New / Renewal / Expansion)"
+        columns:
+          - name: contract_id
+            description: "PK — CTR-######"
+            tests:
+              - unique
+              - not_null
+          - name: account_id
+            description: "FK → accounts.account_id"
+            tests:
+              - not_null
+              - relationships:
+                  to: source('gcs_raw', 'accounts')
+                  field: account_id
+          - name: contract_type
+            tests:
+              - accepted_values:
+                  values: ['New', 'Renewal', 'Expansion']
+          - name: annual_commit_dollars
+            tests:
+              - not_null
+
+      - name: daily_usage_logs
+        description: "~210k daily usage rows; contains injected orphan and out-of-window edge cases"
+        columns:
+          - name: date
+            tests:
+              - not_null
+          - name: account_id
+            # Deliberately NOT tested with relationships — orphan rows are
+            # supposed to exist (edge case #5a). test_orphaned_usage.sql
+            # surfaces them separately.
+            description: "Some rows are orphaned by design (edge case #5a). See tests/test_orphaned_usage.sql"
+
+      - name: support_tickets
+        description: "~27k support tickets"
+        columns:
+          - name: ticket_id
+            tests:
+              - unique
+              - not_null
+          - name: severity
+            description: "Integer 1..3: 1=critical, 2=high, 3=low"
+            tests:
+              - accepted_values:
+                  values: [1, 2, 3]
+                  quote: false
+
+      - name: account_health
+        description: "~56k daily account health color rows"
+        columns:
+          - name: date
+            tests:
+              - not_null
+          - name: account_id
+            tests:
+              - not_null
+              - relationships:
+                  to: source('gcs_raw', 'accounts')
+                  field: account_id
+          - name: health_color
+            tests:
+              - accepted_values:
+                  values: ['Green', 'Yellow', 'Red']

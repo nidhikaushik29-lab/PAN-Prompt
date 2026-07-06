@@ -1,0 +1,88 @@
+version: 2
+
+# ==========================================================================
+# Intermediate models. Materialized as views. Not exposed to end users.
+# These wrap join / aggregation logic that mart models compose.
+# ==========================================================================
+
+models:
+  - name: int_snapshot_dates
+    description: "Month-end dates for the AVR time series. 18 rows by default."
+    columns:
+      - name: snapshot_date
+        tests: [unique, not_null]
+
+  - name: int_account_contract_active
+    description: "The single active contract per (snapshot_date, account_id). Resolves EC-4 overlapping contracts by preferring latest start_date."
+    columns:
+      - name: snapshot_date
+        tests: [not_null]
+      - name: account_id
+        tests: [not_null]
+      - name: contract_id
+        tests: [not_null]
+    tests:
+      # Composite uniqueness (dbt's own dbt_utils.unique_combination_of_columns
+      # would be cleaner, but avoid the package dep — use a simple singular
+      # test in tests/ instead. See test_int_active_contract_unique.sql.
+      - dbt_utils.unique_combination_of_columns:
+          combination_of_columns:
+            - snapshot_date
+            - account_id
+
+  - name: int_account_usage_windows
+    description: "Usage logs filtered to (real account) AND (inside SOME contract window). Removes EC-5a and EC-5b."
+    columns:
+      - name: log_id
+        tests: [unique, not_null]
+
+  - name: int_account_snapshot_usage
+    description: "Trailing usage aggregates per (snapshot_date, account_id) for the D, C, B, and expansion components."
+    columns:
+      - name: snapshot_date
+        tests: [not_null]
+      - name: account_id
+        tests: [not_null]
+
+  - name: int_account_snapshot_tickets
+    description: "Open-ticket signals per (snapshot_date, account_id) for the T-component of AVR. DENSE grain across all ever-active accounts so LAG for the 30-day trend signal has continuous history. Columns: sev-1/2/3 open counts, age-weighted load (sev_weight × age_multiplier), and previous-snapshot age-weighted load."
+    columns:
+      - name: snapshot_date
+        tests: [not_null]
+      - name: account_id
+        tests: [not_null]
+      - name: open_sev1
+        tests:
+          - not_null
+          - dbt_utils.expression_is_true:
+              expression: ">= 0"
+      - name: open_sev2
+        tests:
+          - not_null
+          - dbt_utils.expression_is_true:
+              expression: ">= 0"
+      - name: open_sev3
+        tests:
+          - not_null
+          - dbt_utils.expression_is_true:
+              expression: ">= 0"
+      - name: age_weighted_load
+        tests:
+          - not_null
+          - dbt_utils.expression_is_true:
+              expression: ">= 0"
+      # prev_age_weighted_load is NULL for each account's first snapshot;
+      # component_t in mart_account_avr falls back to current value so the
+      # 30-day trend signal defaults to 0.5 (neutral) on the first snapshot.
+
+  - name: int_account_snapshot_health
+    description: "Latest health color as of snapshot_date + had_red_last_30d flag."
+    columns:
+      - name: snapshot_date
+        tests: [not_null]
+      - name: account_id
+        tests: [not_null]
+      - name: latest_color
+        tests:
+          - accepted_values:
+              values: ['Green', 'Yellow', 'Red']

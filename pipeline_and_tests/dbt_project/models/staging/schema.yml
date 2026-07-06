@@ -1,0 +1,101 @@
+version: 2
+
+# ==========================================================================
+# Staging models. Materialized as views in gcs_north_star_stg.
+# Column-level tests here catch schema drift AFTER renames/casts, whereas
+# tests in _sources.yml catch drift in the raw tables.
+# ==========================================================================
+
+models:
+  - name: stg_csm_reps
+    description: "One row per CSM. csm_id is the canonical CSM identifier."
+    columns:
+      - name: csm_id
+        tests: [unique, not_null]
+      - name: region
+        tests:
+          - not_null
+          - accepted_values:
+              values: ['AMER', 'EMEA', 'APAC', 'JAPAC']
+      - name: csm_segment
+        tests:
+          - accepted_values:
+              values: ['Enterprise', 'Mid-Market']
+
+  - name: stg_accounts
+    description: "One row per account. rep_id → csm_reps.csm_id (name-mismatch FK)."
+    columns:
+      - name: account_id
+        tests: [unique, not_null]
+      - name: rep_id
+        tests:
+          - not_null
+          - relationships:
+              to: ref('stg_csm_reps')
+              field: csm_id
+      - name: account_segment
+        tests:
+          - accepted_values:
+              values: ['Enterprise', 'Mid-Market']
+
+  - name: stg_contracts
+    description: "Contracts with derived contract_days."
+    columns:
+      - name: contract_id
+        tests: [unique, not_null]
+      - name: account_id
+        tests:
+          - not_null
+          - relationships:
+              to: ref('stg_accounts')
+              field: account_id
+      - name: contract_type
+        tests:
+          - accepted_values:
+              values: ['New', 'Renewal', 'Expansion']
+
+  - name: stg_daily_usage_logs
+    description: "Raw usage logs. Contains injected orphans + out-of-window rows by design."
+    columns:
+      - name: log_id
+        tests: [unique, not_null]
+      - name: date
+        tests: [not_null]
+
+  - name: stg_support_tickets
+    description: "Support tickets with is_open convenience flag. severity is INT64 (1/2/3)."
+    columns:
+      - name: ticket_id
+        tests: [unique, not_null]
+      - name: account_id
+        tests:
+          - not_null
+          - relationships:
+              to: ref('stg_accounts')
+              field: account_id
+      - name: severity
+        tests:
+          - not_null
+          - accepted_values:
+              values: [1, 2, 3]
+              quote: false
+      - name: status
+        tests:
+          - accepted_values:
+              values: ['Open', 'In Progress', 'Resolved', 'Closed']
+
+  - name: stg_account_health
+    description: "Weekly account health snapshots."
+    columns:
+      - name: account_id
+        tests:
+          - not_null
+          - relationships:
+              to: ref('stg_accounts')
+              field: account_id
+      - name: date
+        tests: [not_null]
+      - name: health_color
+        tests:
+          - accepted_values:
+              values: ['Green', 'Yellow', 'Red']

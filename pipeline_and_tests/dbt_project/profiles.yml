@@ -1,0 +1,26 @@
+# dbt profiles.yml
+# Auth: uses Application Default Credentials (ADC). Set up via:
+#   gcloud auth application-default login
+# ADC lives at ~/.config/gcloud/application_default_credentials.json
+#
+# This file is stored inside the repo (dbt_project/profiles.yml) rather than
+# the default location (~/.dbt/profiles.yml). The Makefile sets
+# DBT_PROFILES_DIR=dbt_project so dbt picks it up.
+
+gcs_north_star:
+  target: dev
+  outputs:
+    dev:
+      type: bigquery
+      method: oauth              # uses ADC
+      project: global-customer-services-gcs
+      dataset: gcs_north_star    # default; individual model schemas override via +schema
+      location: US
+      threads: 4
+      priority: interactive
+      job_execution_timeout_seconds: 600
+      job_retries: 1
+      # dbt appends "_" + schema to dataset to form the target dataset:
+      #   staging → gcs_north_star_stg
+      #   marts   → gcs_north_star_marts
+      # This keeps raw sources untouched under `gcs_north_star`.

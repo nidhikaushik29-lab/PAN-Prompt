@@ -1,0 +1,7 @@
+[
+  {"name": "csm_id",    "type": "STRING", "mode": "REQUIRED"},
+  {"name": "name",      "type": "STRING", "mode": "REQUIRED"},
+  {"name": "region",    "type": "STRING", "mode": "REQUIRED"},
+  {"name": "segment",   "type": "STRING", "mode": "REQUIRED"},
+  {"name": "hire_date", "type": "DATE",   "mode": "REQUIRED"}
+]

@@ -1,0 +1,6 @@
+# dbt package dependencies.
+# Install with: dbt deps  (or make dbt-deps)
+
+packages:
+  - package: dbt-labs/dbt_utils
+    version: [">=1.3.0", "<2.0.0"]

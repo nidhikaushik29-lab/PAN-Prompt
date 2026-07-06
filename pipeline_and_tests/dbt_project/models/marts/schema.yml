@@ -1,0 +1,71 @@
+version: 2
+
+# ==========================================================================
+# Marts. Materialized as tables in gcs_north_star_marts.
+# These are the end-user surfaces — dashboards, BI tools, compensation
+# analytics all read from here.
+# ==========================================================================
+
+models:
+  - name: mart_account_avr
+    description: "Account-grain AVR time series. One row per (snapshot_date, account_id)."
+    tests:
+      - dbt_utils.unique_combination_of_columns:
+          combination_of_columns:
+            - snapshot_date
+            - account_id
+    columns:
+      - name: snapshot_date
+        tests: [not_null]
+      - name: account_id
+        tests: [not_null]
+      - name: rep_id
+        tests:
+          - not_null
+          - relationships:
+              to: ref('stg_csm_reps')
+              field: csm_id
+      - name: avr_score
+        description: "0-100 composite score. Range enforced by test_avr_score_range.sql. NULL when is_ramp_period = TRUE (account is still in the ramp period and is deliberately not scored by AVR v1 — see specs/01-north-star-metric.md § Known limitations)."
+      - name: band
+        tests:
+          - not_null
+          - accepted_values:
+              values: ['Green', 'Yellow', 'Red', 'Onboarding']
+      - name: is_ramp_period
+        description: "TRUE when days_in_contract < ramp_period_days (default 90). Ramp-period accounts have NULL avr_score and band = 'Onboarding', are excluded from mart_csm_avr aggregations, and render an onboarding-explainer block in the dashboard Account-detail section instead of a score-card grid."
+        tests: [not_null]
+      - name: expansion_flag
+        tests: [not_null]
+      - name: d_score
+        tests: [not_null]
+      - name: c_score
+        tests: [not_null]
+      - name: t_score
+        tests: [not_null]
+      - name: r_score
+        tests: [not_null]
+      - name: b_score
+        tests: [not_null]
+
+  - name: mart_csm_avr
+    description: "CSM-grain rollup of mart_account_avr. One row per (snapshot_date, csm_id) including zero-book CSMs."
+    tests:
+      - dbt_utils.unique_combination_of_columns:
+          combination_of_columns:
+            - snapshot_date
+            - csm_id
+    columns:
+      - name: snapshot_date
+        tests: [not_null]
+      - name: csm_id
+        tests:
+          - not_null
+          - relationships:
+              to: ref('stg_csm_reps')
+              field: csm_id
+      - name: n_accounts
+        tests: [not_null]
+      - name: book_arr
+        tests: [not_null]
+      # avg_avr and arr_weighted_avr can be NULL for zero-account CSM rows

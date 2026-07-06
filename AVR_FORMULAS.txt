@@ -1,0 +1,370 @@
+================================================================================
+  AVR — Account Value Realization
+  How the North-Star Metric is Calculated
+================================================================================
+
+AVR is a composite score, 0-100, computed per account per snapshot.
+Range: [0, 100]. Bands: Green >= 75, Yellow 50-74, Red < 50.
+
+Source of truth: dbt_project/models/marts/mart_account_avr.sql
+Design spec:     specs/01-north-star-metric.md
+
+--------------------------------------------------------------------------------
+  Top-level formula
+--------------------------------------------------------------------------------
+
+  AVR = 100 x (0.20 * D + 0.30 * C + 0.25 * T + 0.15 * R + 0.10 * B)
+
+Each of the 5 components (D, C, T, R, B) is normalized to [0, 1] before
+weighting, so the final AVR sits in [0, 100].
+
+Weights sum to 1.0 and live in dbt_project/dbt_project.yml as vars (tunable
+without touching SQL). Rationale for the weights:
+
+  - Usage-driven components (D + C + B) sum to 60% -- usage is the primary
+    signal of realized value.
+  - Sustainability (C) is the single largest at 30% because spike-and-drop
+    consumption is the strongest churn predictor in the source system.
+  - No component exceeds 30%: invariant that no single anomaly can dominate
+    the score.
+
+
+================================================================================
+  D -- Deployment Depth   (weight 0.20)
+================================================================================
+
+Question answered: "Are they actually using what they bought last month?"
+
+Formula:
+  D = MIN(1.0, credits_last_month / included_monthly_compute_credits)
+
+Inputs:
+  - credits_last_month              from int_account_snapshot_usage
+  - included_monthly_compute_credits from active contract
+
+Behavior:
+  - Shelfware account (used nothing)      -> D ~ 0
+  - Fully deployed account                -> D ~ 1
+  - Overage account (used > allotment)    -> D = 1.0 (CAPPED)
+
+Why capped: overages are not penalized OR double-rewarded here. They fire
+the separate Expansion Opportunity flag (see bottom of doc).
+
+Source: mart_account_avr.sql:35-45
+
+
+================================================================================
+  C -- Consumption Sustainability   (weight 0.30 -- highest)
+================================================================================
+
+Question answered: "Is usage steady, or spike-and-drop?"
+Measured with the coefficient of variation on the last 90 days.
+
+Formula:
+  CV = STDDEV(daily_usage_last_90d) / AVG(daily_usage_last_90d)
+  C  = GREATEST(0, LEAST(1, 1 - CV))
+
+Inputs:
+  - sd_90d, mean_90d, n_days_90d   from int_account_snapshot_usage
+
+Behavior:
+  - Steady usage      -> CV small       -> C ~ 1
+  - Spike-and-drop    -> CV large (>1)  -> C = 0
+
+Safety valves (won't reward accounts with no signal):
+  - If mean_90d = 0        -> C = 0
+  - If mean_90d IS NULL    -> C = 0
+  - If n_days_90d < 10     -> C = 0
+
+Source: mart_account_avr.sql:48-58
+
+
+================================================================================
+  T -- Technical Health   (weight 0.25)
+================================================================================
+
+Question answered: "Is the account tech-happy and ticket-quiet, and is that
+picture getting better or worse month-over-month?"
+
+Blend of THREE independent signals (sub-weights sum to 1.0). Enhanced
+2026-07-04 per exec ask — see "History" at bottom of this section for the
+prior 2-signal formula.
+
+Formula:
+  T_color   = CASE latest_color
+                WHEN 'Green'  THEN 1.0
+                WHEN 'Yellow' THEN 0.5
+                WHEN 'Red'    THEN 0.0
+                ELSE               0.5   -- missing = unknown, NOT good
+              END
+
+  age_weighted_load = SUM over open tickets of
+                        sev_weight × age_multiplier
+    sev_weight     = {1: 0.50, 2: 0.20, 3: 0.05}
+    age_multiplier = 1 + LEAST(1, age_days / 30)    -- 1x fresh, 2x >=30d
+
+  T_tickets = 1 - LEAST(1, age_weighted_load / 4.0)
+
+  T_trend   = 0.5 - LEAST(0.5, GREATEST(-0.5,
+                (age_weighted_load - prev_snapshot_load) / 4.0
+              ))
+              -- first-ever snapshot: prev falls back to current
+              -- so T_trend defaults to 0.5 (neutral) rather than
+              -- treating a new account with tickets as "regressing"
+
+  T = 0.55 * T_color + 0.30 * T_tickets + 0.15 * T_trend
+
+Sub-weights:
+  - 55% latest CSM-entered health color (from stg_customer_health_scores)
+    This is the "Latest health" field shown on the account drill-down.
+  - 30% age-weighted ticket load (from stg_support_tickets)
+    Includes sev-3 at noise level; older open tickets count more heavily.
+  - 15% 30-day trend in ticket load
+    Bonus for improvement, penalty for regression, neutral if flat.
+
+Calibration:
+  Ticket load:
+    - 1 fresh sev-1 open        -> T_tickets ~ 0.875
+    - 3 fresh sev-1 open        -> T_tickets ~ 0.625
+    - 8 fresh sev-1 open        -> T_tickets = 0
+    - 30-day-old sev-1          -> counts as 2x a fresh sev-1
+    - 20 fresh sev-3 open       -> T_tickets ~ 0.75  (noise-level by design)
+
+  Trend:
+    - +4 pts load vs last month -> T_trend = 0    (max penalty)
+    - -4 pts load vs last month -> T_trend = 1    (max bonus)
+    - flat / first snapshot     -> T_trend = 0.5  (neutral)
+
+Missing-data invariant:
+  If no health_color exists for a snapshot, T_color defaults to 0.5 (unknown),
+  NOT 1.0. Missing data cannot silently inflate the score.
+
+Source: mart_account_avr.sql component_t CTE + int_account_snapshot_tickets.sql
+
+CSM-level rollup:
+  Surfaced on the leaderboard as the "Technical Health" column
+  (specs/08-dashboard.md §4). Two forms exposed on mart_csm_avr:
+    avg_technical_health         = AVG(t_score) * 100   (each account 1 vote,
+                                                         matches Average AVR)
+    arr_weighted_technical_health = SAFE_DIVIDE(SUM(arr * t_score),
+                                                SUM(arr))  * 100
+                                    (bigger books count more, matches
+                                     ARR-weighted AVR)
+  Both use the same 75/50 band thresholds as AVR.
+
+History:
+  Prior to 2026-07-04:  T = 0.6 * T_color + 0.4 * T_tickets_v1
+                        where T_tickets_v1 = 1 - LEAST(1,
+                                             (open_sev1*0.5 + open_sev2*0.2) / 3)
+                        (no sev-3, no age decay, no trend, weights 0.6/0.4)
+  Enhanced per exec ask to give the T-component a defensible "Technical
+  Health" story on the leaderboard: (a) surface sev-3 as noise-level signal
+  since it's 85% of ticket volume, (b) reward fast MTTR via age decay,
+  (c) reward month-over-month improvement via trend signal.
+
+
+================================================================================
+  R -- Retention Signal   (weight 0.15)
+================================================================================
+
+Question answered: "How close to renewal, and does the customer look happy
+approaching it?"
+
+Formula:
+  R = CASE
+        WHEN days_to_renewal > 180
+          THEN 1.00                     -- far from renewal
+        WHEN days_to_renewal BETWEEN 60 AND 180
+          THEN 0.75                     -- upcoming
+        WHEN days_to_renewal BETWEEN 0 AND 59 AND NOT had_red_last_30d
+          THEN 1.00                     -- clean approach
+        WHEN days_to_renewal BETWEEN 0 AND 59 AND had_red_last_30d
+          THEN 0.25                     -- at-risk approach (alarm)
+        ELSE
+          0.00                          -- expired / lapsed
+      END
+
+Inputs:
+  - days_to_renewal    contract end date - snapshot date
+  - had_red_last_30d   from int_account_snapshot_health (any Red flag
+                       recorded in the trailing 30 days)
+
+The 0.25 case is the retention alarm: customer is inside the 8-week
+renewal window AND has flashed Red recently. This is the row that most
+often flips an account into the Yellow band.
+
+Source: mart_account_avr.sql:86-102
+
+
+================================================================================
+  B -- Bookings Realization   (weight 0.10 -- lowest)
+================================================================================
+
+Question answered: "Are they on track to consume what they committed to
+over the whole year?"
+
+Formula:
+  prorated_allotment = included_monthly_compute_credits x (days_in_contract / 30.0)
+  B = MIN(1.0, credits_ytd_contract / prorated_allotment)
+
+Inputs:
+  - credits_ytd_contract   consumption since contract start
+                           (from int_account_snapshot_usage)
+  - days_in_contract       from int_account_contract_active
+
+Behavior:
+  - Prorated: a 90-day-old contract is judged on 3 months of expected
+    consumption, not the full annual figure.
+  - Capped at 1.0 (same rationale as D): overages don't inflate B.
+
+Source: mart_account_avr.sql:105-115
+
+
+================================================================================
+  Final assembly
+================================================================================
+
+Source: mart_account_avr.sql:155-161
+
+  avr_score = ROUND(100 * (
+        0.20 * d_score
+      + 0.30 * c_score
+      + 0.25 * t_score
+      + 0.15 * r_score
+      + 0.10 * b_score
+  ), 1)
+
+Then banded (mart_account_avr.sql:176-180):
+
+  CASE
+    WHEN avr_score >= 75 THEN 'Green'
+    WHEN avr_score >= 50 THEN 'Yellow'
+    ELSE                      'Red'
+  END AS band
+
+
+================================================================================
+  Worked example
+================================================================================
+
+Suppose one account has these component scores on a given snapshot:
+
+  D = 0.95   (used 95% of allotment last month)
+  C = 0.88   (very steady 90-day consumption)
+  T = 0.81   (Green health + ~3 fresh sev-1 open + load flat vs last month:
+              0.55*1.0 + 0.30*(1 - 1.5/4) + 0.15*0.5 = 0.81)
+  R = 1.00   (>180 days to renewal)
+  B = 0.90   (on-track vs prorated annual)
+
+Then:
+
+  AVR = 100 x (0.20 x 0.95      -> 0.190
+             + 0.30 x 0.88      -> 0.264
+             + 0.25 x 0.81      -> 0.203
+             + 0.15 x 1.00      -> 0.150
+             + 0.10 x 0.90      -> 0.090
+             ---------------
+                                   0.897)
+      = 89.7
+      = Green band
+
+The account drill-down section in the dashboard (appears when a single
+Customer is selected) shows this exact breakdown as a horizontal bar chart,
+so you can see which lever is dragging AVR up or down.
+
+
+================================================================================
+  Expansion Opportunity flag (separate from AVR)
+================================================================================
+
+A boolean flag, NOT part of the AVR score:
+
+  expansion_flag = (trailing_3mo_usage >= 0.90 x (3 x included_monthly_compute_credits))
+                    AND (days_to_renewal <= 180)
+
+Rationale: consistent overages are good news -- they signal the customer
+needs a bigger contract. Rolling them into AVR would inflate the score
+AND hide the commercial opportunity. Keeping them separate lets the CSM
+team convert them.
+
+The 90% threshold is intentionally "approaching cap" rather than "already
+over" -- it surfaces expansion candidates BEFORE they blow through their
+allotment, giving CSMs a lead-time signal to open the renewal conversation.
+(Prior to 2026-07-04 this threshold was 1.20 = 120% "over cap"; changed
+per exec ask.)
+
+Source: mart_account_avr.sql:117-130
+
+
+================================================================================
+  Design invariants
+================================================================================
+
+1. Overages are rewarded commercially, not penalized in AVR.
+   D and B are capped at 1.0 so overage cannot both raise the health score
+   AND obscure the expansion signal.
+
+2. Shelfware cannot score above ~40.
+   The three usage-driven components (D + C + B = 60% of weight) all
+   collapse to 0 when there's no consumption, so ceiling AVR for a
+   shelfware account is approximately 25*T + 15*R = ~40.
+
+3. A single anomaly cannot dominate.
+   No component exceeds 30% weight; D and B are capped at 1.0.
+
+4. Missing data != good data.
+   T_color defaults to 0.5 (unknown), not 1.0. A silently broken data
+   feed cannot inflate scores.
+
+5. New-logo ramp is excluded, not misjudged (v1.1, 2026-07-05).
+   Accounts with days_in_contract < ramp_period_days (90 default) get
+   is_ramp_period = TRUE, avr_score = NULL, band = 'Onboarding'.
+   Component scores are still materialised for audit but never enter
+   any aggregation. D and B compare consumption against a flat
+   allotment; a customer hitting standard onboarding benchmarks
+   (20-30% of allotment in month 1) would score as shelfware without
+   this exclusion. mart_csm_avr filters ramping accounts out
+   unconditionally so CSM aggregates are always over scored accounts
+   only. See specs/01-north-star-metric.md § Known limitations (v1).
+
+
+================================================================================
+  Tuning knobs (all in dbt_project.yml vars)
+================================================================================
+
+  - Component weights                 (must sum to 1.0)
+  - Green / Yellow band cutoffs       (band_green_cutoff, band_yellow_cutoff)
+  - CV window                         (90 days default)
+  - Expansion overage threshold       (0.90 = 90% default; was 1.20 pre-2026-07-04)
+  - Expansion days-to-renewal ceiling (180 default)
+  - T sub-weights                     (0.55 / 0.30 / 0.15 for color / tickets / trend;
+                                       was 0.60 / 0.40 pre-2026-07-04)
+  - T ticket severity weights         (sev-1: 0.50, sev-2: 0.20, sev-3: 0.05)
+  - T ticket load denominator         (4.0)
+  - T age-decay ramp                  (30-day linear, capped at 2x)
+  - T trend denominator               (4.0, symmetric ± bonus/penalty)
+  - Ramp-period cutoff                (ramp_period_days = 90 default; added v1.1
+                                       2026-07-05; suppresses avr_score during
+                                       the new-logo onboarding window)
+
+
+================================================================================
+  File references
+================================================================================
+
+  Formula implementation
+    dbt_project/models/marts/mart_account_avr.sql
+
+  Design spec (rationale, edge cases, invariants)
+    specs/01-north-star-metric.md
+
+  Component intermediate models
+    dbt_project/models/intermediate/int_account_contract_active.sql
+    dbt_project/models/intermediate/int_account_snapshot_usage.sql
+    dbt_project/models/intermediate/int_account_snapshot_tickets.sql
+    dbt_project/models/intermediate/int_account_snapshot_health.sql
+
+  Tunable variables
+    dbt_project/dbt_project.yml (vars: block)
+
+================================================================================

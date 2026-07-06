@@ -1,0 +1,36 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# Generated data (reproducible from `make generate`)
+data/raw/*.csv
+data/raw/*.parquet
+
+# dbt build artifacts (reproducible from `make dbt-build`)
+pipeline_and_tests/dbt_project/dbt_packages/
+pipeline_and_tests/dbt_project/target/
+pipeline_and_tests/dbt_project/logs/
+pipeline_and_tests/dbt_project/.user.yml
+
+# Runtime logs
+logs/
+
+# Local credentials — NEVER commit
+*.json.key
+service-account*.json
+.env
+.env.*
+
+# macOS
+.DS_Store
+
+# IDE
+.idea/
+.vscode/
+*.swp

@@ -1,0 +1,8 @@
+[
+  {"name": "account_id",   "type": "STRING", "mode": "REQUIRED"},
+  {"name": "company_name", "type": "STRING", "mode": "REQUIRED"},
+  {"name": "industry",     "type": "STRING", "mode": "REQUIRED"},
+  {"name": "rep_id",       "type": "STRING", "mode": "REQUIRED"},
+  {"name": "segment",      "type": "STRING", "mode": "REQUIRED"},
+  {"name": "signup_date",  "type": "DATE",   "mode": "REQUIRED"}
+]

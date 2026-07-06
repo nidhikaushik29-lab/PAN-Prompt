@@ -1,0 +1,66 @@
+# dbt_project/dbt_project.yml
+# GCS North Star dbt project — Phase 2 of the AVR pipeline.
+# Reads from sources.gcs_raw.* (loaded by src/bq/load.py in Phase 1)
+# Writes into gcs_north_star_marts.* (marts) and gcs_north_star_stg.* (staging)
+
+name: gcs_north_star
+version: '1.0.0'
+config-version: 2
+
+profile: gcs_north_star
+
+model-paths: ["models"]
+analysis-paths: ["analyses"]
+test-paths: ["tests"]
+seed-paths: ["seeds"]
+macro-paths: ["macros"]
+snapshot-paths: ["snapshots"]
+
+target-path: "target"
+clean-targets:
+  - "target"
+  - "dbt_packages"
+  - "logs"
+
+# Warehouse configuration variables
+vars:
+  # Snapshot dates for time-series AVR. Overridden via `--vars '{snapshot_start: ...}'`
+  snapshot_start: '2025-01-31'
+  snapshot_end: '2026-06-30'
+  # Trailing windows for the C (consumption sustainability) and expansion flag components
+  cv_window_days: 90
+  expansion_window_days: 90
+  # Expansion flag threshold: trailing 3mo consumption >= threshold * (3 * monthly allotment)
+  # 0.90 = flag accounts using >=90% of their allotment (early-warning / approaching cap).
+  # Was 1.20 (over-consuming / true overage) prior to 2026-07-04 exec ask.
+  expansion_overage_threshold: 0.90
+  # Retention signal: days-to-renewal cutoff for expansion opportunity
+  expansion_days_to_renewal: 180
+  # AVR band cutoffs
+  band_green_cutoff: 75
+  band_yellow_cutoff: 50
+  # New-logo ramp period. Accounts with days_in_contract < ramp_period_days are
+  # flagged is_ramp_period = TRUE; their avr_score is NULLed and band set to
+  # 'Onboarding'. Rationale: D (Deployment) and B (Bookings Realization) both
+  # measure raw consumption against a flat allotment, without an expected-ramp
+  # curve — so healthy customers onboarding on schedule (20-30% of allotment in
+  # month 1) score as if they were shelfware. 90 days aligns with the industry
+  # rule of thumb for "time to first value" in enterprise SaaS. See
+  # specs/01-north-star-metric.md § Known limitations (v1).
+  ramp_period_days: 90
+
+# Model configuration by folder
+models:
+  gcs_north_star:
+    # Staging: renamed/typed pass-throughs of sources. Views (cheap).
+    staging:
+      +materialized: view
+      +schema: stg
+    # Intermediate: business joins, still not exposed to end users. Views.
+    intermediate:
+      +materialized: view
+      +schema: stg
+    # Marts: end-user-facing tables. Materialized for query performance.
+    marts:
+      +materialized: table
+      +schema: marts
